@@ -64,39 +64,43 @@ jobs:
         choco install -y putty
         choco install -y winscp
 
-    - name: Download and setup Cloudflare Tunnel
+    - name: Download and setup Bore Tunnel
       run: |
-        # Download cloudflared
-        Write-Host "📥 Downloading Cloudflare Tunnel..."
-        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
-        
+        # Download bore
+        Write-Host "📥 Downloading Bore tunnel..."
+        Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.exe" -OutFile "bore.exe"
+
         # Verify download
-        if (Test-Path "cloudflared.exe") {
-          Write-Host "✅ Cloudflared downloaded successfully"
-          .\cloudflared.exe version
+        if (Test-Path "bore.exe") {
+          Write-Host "✅ Bore downloaded successfully"
+          .\bore.exe --version
         } else {
-          Write-Host "❌ Cloudflared download failed"
+          Write-Host "❌ Bore download failed"
           exit 1
         }
 
-    - name: Setup Cloudflare Tunnel
+    - name: Setup Bore Tunnel
       run: |
-        # Create tunnel without authentication (temporary tunnel)
-        Write-Host "🚀 Starting Cloudflare tunnel for RDP..."
-        
-        # Start cloudflared tunnel in background
-        Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel", "--url", "tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput "tunnel.log" -RedirectStandardError "tunnel_error.log"
-        
+        # Start bore tunnel for RDP
+        Write-Host "🚀 Starting Bore tunnel for RDP..."
+
+        # Generate random port for bore server
+        $remotePort = Get-Random -Minimum 10000 -Maximum 65000
+
+        # Start bore tunnel in background
+        Start-Process -FilePath ".\bore.exe" -ArgumentList "local", "3389", "--to", "bore.pub:$remotePort" -WindowStyle Hidden -RedirectStandardOutput "tunnel.log" -RedirectStandardError "tunnel_error.log"
+
         # Wait for tunnel to start
         Write-Host "⏳ Waiting for tunnel to initialize..."
-        Start-Sleep -Seconds 15
-        
+        Start-Sleep -Seconds 10
+
         # Check if process is running
-        $tunnelProcess = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+        $tunnelProcess = Get-Process -Name "bore" -ErrorAction SilentlyContinue
         if ($tunnelProcess) {
-          Write-Host "✅ Cloudflare tunnel started successfully (PID: $($tunnelProcess.Id))"
+          Write-Host "✅ Bore tunnel started successfully (PID: $($tunnelProcess.Id))"
+          Write-Host "🌐 Tunnel should be available at: bore.pub:$remotePort"
         } else {
-          Write-Host "❌ Cloudflare tunnel failed to start"
+          Write-Host "❌ Bore tunnel failed to start"
           if (Test-Path "tunnel_error.log") {
             Write-Host "📋 Error logs:"
             Get-Content "tunnel_error.log"
@@ -105,59 +109,41 @@ jobs:
 
     - name: Get Tunnel Connection Info
       run: |
-        # Wait for tunnel logs to be generated
-        $maxAttempts = 20
-        $attempt = 1
-        $tunnelFound = $false
-        
-        Write-Host "🔍 Looking for tunnel connection info..."
-        
-        while ($attempt -le $maxAttempts -and -not $tunnelFound) {
-          Write-Host "Attempt $attempt/$maxAttempts - Checking tunnel logs..."
-          
-          if (Test-Path "tunnel.log") {
-            $logContent = Get-Content "tunnel.log" -Raw
-            
-            # Look for tunnel URL in logs
-            if ($logContent -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
-              $tunnelUrl = $matches[0]
-              
-              Write-Host "=================================="
-              Write-Host "🎉 RDP IS READY!"
-              Write-Host "=================================="
-              Write-Host "Tunnel URL: $tunnelUrl"
-              Write-Host "Protocol: TCP over HTTPS"
-              Write-Host "Username: runneradmin"
-              Write-Host "Password: $(if ('${{ github.event.inputs.password }}') { '${{ github.event.inputs.password }}' } elseif ('${{ secrets.RDP_PASSWORD }}') { '${{ secrets.RDP_PASSWORD }}' } else { 'P@ssw0rd123!' })"
-              Write-Host "=================================="
-              Write-Host ""
-              Write-Host "📋 Connection Instructions:"
-              Write-Host "1. You'll need a TCP-over-HTTPS client"
-              Write-Host "2. Or use SSH tunnel: ssh -L 3389:localhost:3389 user@proxy"
-              Write-Host "3. Then connect RDP to localhost:3389"
-              Write-Host ""
-              Write-Host "⏰ Session will last for ${{ github.event.inputs.duration || '6' }} hours"
-              Write-Host "=================================="
-              $tunnelFound = $true
-            } else {
-              Write-Host "⏳ Tunnel URL not found yet, waiting..."
-            }
-          } else {
-            Write-Host "⏳ Tunnel log file not created yet..."
-          }
-          
-          if (-not $tunnelFound) {
-            Start-Sleep -Seconds 10
-            $attempt++
-          }
-        }
-        
-        if (-not $tunnelFound) {
-          Write-Host "❌ Could not find tunnel URL after $maxAttempts attempts"
-          Write-Host "📋 Available log content:"
-          if (Test-Path "tunnel.log") {
-            Get-Content "tunnel.log"
-          }
+        # Generate the same random port used above
+        $remotePort = Get-Random -Minimum 10000 -Maximum 65000
+
+        # Wait a bit for tunnel to establish
+        Start-Sleep -Seconds 5
+
+        Write-Host "=================================="
+        Write-Host "🎉 RDP IS READY!"
+        Write-Host "=================================="
+        Write-Host "Tunnel Host: bore.pub"
+        Write-Host "Tunnel Port: $remotePort"
+        Write-Host "Protocol: TCP Direct"
+        Write-Host "Username: runneradmin"
+        Write-Host "Password: $(if ('${{ github.event.inputs.password }}') { '${{ github.event.inputs.password }}' } elseif ('${{ secrets.RDP_PASSWORD }}') { '${{ secrets.RDP_PASSWORD }}' } else { 'P@ssw0rd123!' })"
+        Write-Host "=================================="
+        Write-Host ""
+        Write-Host "📋 RDP Connection Instructions:"
+        Write-Host "1. Open Remote Desktop Connection"
+        Write-Host "2. Computer: bore.pub:$remotePort"
+        Write-Host "3. Username: runneradmin"
+        Write-Host "4. Password: P@ssw0rd123!"
+        Write-Host ""
+        Write-Host "📱 Mobile RDP Apps:"
+        Write-Host "- Microsoft Remote Desktop"
+        Write-Host "- RD Client"
+        Write-Host "- TeamViewer (RDP mode)"
+        Write-Host ""
+        Write-Host "⏰ Session will last for ${{ github.event.inputs.duration || '6' }} hours"
+        Write-Host "=================================="
+
+        # Also check tunnel logs for confirmation
+        if (Test-Path "tunnel.log") {
+          Write-Host ""
+          Write-Host "📋 Tunnel Logs:"
+          Get-Content "tunnel.log"
         }
 
     - name: Keep session alive

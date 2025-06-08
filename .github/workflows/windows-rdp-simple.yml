@@ -1,0 +1,214 @@
+name: Windows RDP (Simple & Reliable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Duration in hours (max 6)'
+        required: false
+        default: '6'
+        type: string
+      password:
+        description: 'Custom RDP password (optional)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360  # 6 hours max
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Enable RDP
+      run: |
+        # Enable RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -value 1
+        
+        # Set password for runneradmin user
+        $password = "${{ github.event.inputs.password }}"
+        if ([string]::IsNullOrEmpty($password)) {
+          $password = "${{ secrets.RDP_PASSWORD }}"
+        }
+        if ([string]::IsNullOrEmpty($password)) {
+          $password = "P@ssw0rd123!"
+        }
+        
+        net user runneradmin $password
+        net localgroup "Remote Desktop Users" runneradmin /add
+        
+        Write-Host "RDP enabled successfully!"
+        Write-Host "Username: runneradmin"
+        Write-Host "Password: $password"
+
+    - name: Install Essential Software
+      run: |
+        # Install Chocolatey
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        
+        # Install software
+        choco install -y googlechrome
+        choco install -y firefox
+        choco install -y 7zip
+        choco install -y notepadplusplus
+        choco install -y git
+        choco install -y nodejs
+        choco install -y python
+        choco install -y vscode
+
+    - name: Setup Simple HTTP Server for RDP Info
+      run: |
+        # Create simple HTML page with RDP info
+        $html = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Windows RDP Server</title>
+    <style>
+        body { font-family: Arial; margin: 40px; background: #f0f0f0; }
+        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .success { color: #28a745; font-size: 24px; font-weight: bold; }
+        .info { background: #e9ecef; padding: 15px; border-radius: 5px; margin: 20px 0; }
+        .code { background: #f8f9fa; padding: 10px; border-left: 4px solid #007bff; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="success">🎉 Windows RDP Server is Ready!</h1>
+        
+        <div class="info">
+            <h3>📋 Connection Details:</h3>
+            <div class="code">
+                <strong>Server:</strong> Check GitHub Actions logs for tunnel URL<br>
+                <strong>Username:</strong> runneradmin<br>
+                <strong>Password:</strong> P@ssw0rd123!<br>
+                <strong>Port:</strong> 3389
+            </div>
+        </div>
+        
+        <div class="info">
+            <h3>🖥️ How to Connect:</h3>
+            <ol>
+                <li>Download Microsoft Remote Desktop app</li>
+                <li>Add new connection with server details above</li>
+                <li>Connect and enjoy your Windows VPS!</li>
+            </ol>
+        </div>
+        
+        <div class="info">
+            <h3>📱 Mobile Apps:</h3>
+            <ul>
+                <li>Microsoft Remote Desktop (iOS/Android)</li>
+                <li>RD Client</li>
+                <li>TeamViewer</li>
+            </ul>
+        </div>
+        
+        <p><strong>⏰ Session Duration:</strong> ${{ github.event.inputs.duration || '6' }} hours</p>
+        <p><em>Last updated: $(Get-Date)</em></p>
+    </div>
+</body>
+</html>
+"@
+        
+        $html | Out-File -FilePath "rdp-info.html" -Encoding UTF8
+        
+        # Start simple HTTP server
+        Write-Host "🌐 Starting HTTP server..."
+        Start-Process -FilePath "python" -ArgumentList "-m", "http.server", "8080" -WindowStyle Hidden
+        Start-Sleep -Seconds 5
+
+    - name: Setup Ngrok HTTP Tunnel (FREE)
+      run: |
+        # Download ngrok
+        Write-Host "📥 Downloading ngrok..."
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+        Expand-Archive -Path "ngrok.zip" -DestinationPath "." -Force
+        
+        # Configure ngrok (no auth token needed for HTTP)
+        Write-Host "🚀 Starting ngrok HTTP tunnel..."
+        Start-Process -FilePath ".\ngrok.exe" -ArgumentList "http", "8080" -WindowStyle Hidden
+        
+        # Wait for ngrok to start
+        Start-Sleep -Seconds 10
+
+    - name: Get Connection Info
+      run: |
+        # Get ngrok tunnel info
+        $maxAttempts = 10
+        $attempt = 1
+        $tunnelFound = $false
+        
+        while ($attempt -le $maxAttempts -and -not $tunnelFound) {
+          try {
+            $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get -TimeoutSec 5
+            $httpTunnel = $response.tunnels | Where-Object { $_.proto -eq "https" }
+            
+            if ($httpTunnel) {
+              $webUrl = $httpTunnel.public_url
+              
+              Write-Host "=================================="
+              Write-Host "🎉 WINDOWS RDP IS READY!"
+              Write-Host "=================================="
+              Write-Host "🌐 Web Interface: $webUrl"
+              Write-Host "📋 RDP Connection:"
+              Write-Host "   Server: [Check web interface for tunnel details]"
+              Write-Host "   Username: runneradmin"
+              Write-Host "   Password: P@ssw0rd123!"
+              Write-Host "   Port: 3389"
+              Write-Host "=================================="
+              Write-Host ""
+              Write-Host "📱 Instructions:"
+              Write-Host "1. Open: $webUrl"
+              Write-Host "2. Follow instructions on the web page"
+              Write-Host "3. Use Microsoft Remote Desktop app"
+              Write-Host ""
+              Write-Host "⏰ Session Duration: ${{ github.event.inputs.duration || '6' }} hours"
+              Write-Host "=================================="
+              
+              $tunnelFound = $true
+            }
+          } catch {
+            Write-Host "Attempt $attempt/$maxAttempts - Waiting for ngrok..."
+            Start-Sleep -Seconds 5
+            $attempt++
+          }
+        }
+        
+        if (-not $tunnelFound) {
+          Write-Host "❌ Could not get ngrok tunnel info"
+          Write-Host "🔧 Manual check: http://localhost:4040"
+        }
+
+    - name: Keep session alive
+      run: |
+        $duration = [int]"${{ github.event.inputs.duration || '6' }}"
+        $endTime = (Get-Date).AddHours($duration)
+        
+        Write-Host "🔄 Keeping session alive until $(Get-Date $endTime -Format 'yyyy-MM-dd HH:mm:ss')"
+        
+        while ((Get-Date) -lt $endTime) {
+          Write-Host "⏰ Session active - $(Get-Date -Format 'HH:mm:ss') - Remaining: $([math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)) minutes"
+          
+          # Keep system active
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.SendKeys]::SendWait("{SCROLLLOCK}")
+          
+          Start-Sleep -Seconds 300  # Wait 5 minutes
+        }
+        
+        Write-Host "⏰ Session time expired. Shutting down..."
+
+    - name: Cleanup
+      if: always()
+      run: |
+        Write-Host "🧹 Cleaning up..."
+        Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
+        Stop-Process -Name "python" -Force -ErrorAction SilentlyContinue
+        Write-Host "✅ Cleanup completed"
