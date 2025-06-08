@@ -1,0 +1,195 @@
+name: Windows RDP (Cloudflare Tunnel - FREE)
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Duration in hours (max 6)'
+        required: false
+        default: '6'
+        type: string
+      password:
+        description: 'Custom RDP password (optional)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360  # 6 hours max
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Enable RDP
+      run: |
+        # Enable RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -value 1
+        
+        # Set password for runneradmin user
+        $password = "${{ github.event.inputs.password }}"
+        if ([string]::IsNullOrEmpty($password)) {
+          $password = "${{ secrets.RDP_PASSWORD }}"
+        }
+        if ([string]::IsNullOrEmpty($password)) {
+          $password = "P@ssw0rd123!"
+        }
+        
+        net user runneradmin $password
+        net localgroup "Remote Desktop Users" runneradmin /add
+        
+        Write-Host "RDP enabled successfully!"
+        Write-Host "Username: runneradmin"
+        Write-Host "Password: $password"
+
+    - name: Install Chocolatey
+      run: |
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+    - name: Install Essential Software
+      run: |
+        choco install -y googlechrome
+        choco install -y firefox
+        choco install -y 7zip
+        choco install -y notepadplusplus
+        choco install -y git
+        choco install -y nodejs
+        choco install -y python
+        choco install -y vscode
+        choco install -y putty
+        choco install -y winscp
+
+    - name: Download and setup Cloudflare Tunnel
+      run: |
+        # Download cloudflared
+        Write-Host "📥 Downloading Cloudflare Tunnel..."
+        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+        
+        # Verify download
+        if (Test-Path "cloudflared.exe") {
+          Write-Host "✅ Cloudflared downloaded successfully"
+          .\cloudflared.exe version
+        } else {
+          Write-Host "❌ Cloudflared download failed"
+          exit 1
+        }
+
+    - name: Setup Cloudflare Tunnel
+      run: |
+        # Create tunnel without authentication (temporary tunnel)
+        Write-Host "🚀 Starting Cloudflare tunnel for RDP..."
+        
+        # Start cloudflared tunnel in background
+        Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel", "--url", "tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput "tunnel.log" -RedirectStandardError "tunnel_error.log"
+        
+        # Wait for tunnel to start
+        Write-Host "⏳ Waiting for tunnel to initialize..."
+        Start-Sleep -Seconds 15
+        
+        # Check if process is running
+        $tunnelProcess = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+        if ($tunnelProcess) {
+          Write-Host "✅ Cloudflare tunnel started successfully (PID: $($tunnelProcess.Id))"
+        } else {
+          Write-Host "❌ Cloudflare tunnel failed to start"
+          if (Test-Path "tunnel_error.log") {
+            Write-Host "📋 Error logs:"
+            Get-Content "tunnel_error.log"
+          }
+        }
+
+    - name: Get Tunnel Connection Info
+      run: |
+        # Wait for tunnel logs to be generated
+        $maxAttempts = 20
+        $attempt = 1
+        $tunnelFound = $false
+        
+        Write-Host "🔍 Looking for tunnel connection info..."
+        
+        while ($attempt -le $maxAttempts -and -not $tunnelFound) {
+          Write-Host "Attempt $attempt/$maxAttempts - Checking tunnel logs..."
+          
+          if (Test-Path "tunnel.log") {
+            $logContent = Get-Content "tunnel.log" -Raw
+            
+            # Look for tunnel URL in logs
+            if ($logContent -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
+              $tunnelUrl = $matches[0]
+              
+              Write-Host "=================================="
+              Write-Host "🎉 RDP IS READY!"
+              Write-Host "=================================="
+              Write-Host "Tunnel URL: $tunnelUrl"
+              Write-Host "Protocol: TCP over HTTPS"
+              Write-Host "Username: runneradmin"
+              Write-Host "Password: $(if ('${{ github.event.inputs.password }}') { '${{ github.event.inputs.password }}' } elseif ('${{ secrets.RDP_PASSWORD }}') { '${{ secrets.RDP_PASSWORD }}' } else { 'P@ssw0rd123!' })"
+              Write-Host "=================================="
+              Write-Host ""
+              Write-Host "📋 Connection Instructions:"
+              Write-Host "1. You'll need a TCP-over-HTTPS client"
+              Write-Host "2. Or use SSH tunnel: ssh -L 3389:localhost:3389 user@proxy"
+              Write-Host "3. Then connect RDP to localhost:3389"
+              Write-Host ""
+              Write-Host "⏰ Session will last for ${{ github.event.inputs.duration || '6' }} hours"
+              Write-Host "=================================="
+              $tunnelFound = $true
+            } else {
+              Write-Host "⏳ Tunnel URL not found yet, waiting..."
+            }
+          } else {
+            Write-Host "⏳ Tunnel log file not created yet..."
+          }
+          
+          if (-not $tunnelFound) {
+            Start-Sleep -Seconds 10
+            $attempt++
+          }
+        }
+        
+        if (-not $tunnelFound) {
+          Write-Host "❌ Could not find tunnel URL after $maxAttempts attempts"
+          Write-Host "📋 Available log content:"
+          if (Test-Path "tunnel.log") {
+            Get-Content "tunnel.log"
+          }
+        }
+
+    - name: Keep session alive
+      run: |
+        $duration = [int]"${{ github.event.inputs.duration || '6' }}"
+        $endTime = (Get-Date).AddHours($duration)
+        
+        Write-Host "🔄 Keeping session alive until $(Get-Date $endTime -Format 'yyyy-MM-dd HH:mm:ss')"
+        
+        while ((Get-Date) -lt $endTime) {
+          Write-Host "⏰ Session active - $(Get-Date -Format 'HH:mm:ss') - Remaining: $([math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)) minutes"
+          
+          # Check if cloudflared is still running
+          $tunnelProcess = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+          if (-not $tunnelProcess) {
+            Write-Host "⚠️ Cloudflare tunnel died, restarting..."
+            Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel", "--url", "tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput "tunnel.log" -RedirectStandardError "tunnel_error.log"
+            Start-Sleep -Seconds 15
+          }
+          
+          # Keep system active
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.SendKeys]::SendWait("{SCROLLLOCK}")
+          
+          Start-Sleep -Seconds 300  # Wait 5 minutes
+        }
+        
+        Write-Host "⏰ Session time expired. Shutting down..."
+
+    - name: Cleanup
+      if: always()
+      run: |
+        Write-Host "🧹 Cleaning up..."
+        Stop-Process -Name "cloudflared" -Force -ErrorAction SilentlyContinue
+        Write-Host "✅ Cleanup completed"
