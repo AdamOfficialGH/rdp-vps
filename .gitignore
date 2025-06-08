@@ -1,0 +1,74 @@
+# SSH Keys
+*.pem
+*.key
+*_rsa
+*_rsa.pub
+github-actions-key*
+id_rsa*
+id_ed25519*
+
+# Ngrok
+ngrok
+ngrok.exe
+ngrok.yml
+.ngrok2/
+
+# Logs
+*.log
+logs/
+*.out
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+temp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.staging
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Windows specific
+*.exe
+*.msi
+*.dll
+
+# Linux specific
+*.deb
+*.rpm
+*.AppImage
+
+# Secrets (just in case)
+secrets.txt
+passwords.txt
+tokens.txt
+credentials.txt

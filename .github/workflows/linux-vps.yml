@@ -1,0 +1,246 @@
+name: Linux VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Duration in hours (max 6)'
+        required: false
+        default: '6'
+        type: string
+      password:
+        description: 'Custom SSH password (optional)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup SSH Server
+      run: |
+        # Update system
+        sudo apt-get update
+        
+        # Install SSH server
+        sudo apt-get install -y openssh-server
+        
+        # Configure SSH
+        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+        sudo sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config
+        
+        # Set password for runner user
+        password="${{ github.event.inputs.password }}"
+        if [ -z "$password" ]; then
+          password="${{ secrets.SSH_PASSWORD }}"
+        fi
+        if [ -z "$password" ]; then
+          password="P@ssw0rd123!"
+        fi
+        
+        echo "runner:$password" | sudo chpasswd
+        
+        # Add SSH public key if provided
+        if [ -n "${{ secrets.SSH_PUBLIC_KEY }}" ]; then
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          chmod 700 ~/.ssh
+        fi
+        
+        # Start SSH service
+        sudo systemctl start ssh
+        sudo systemctl enable ssh
+        
+        echo "SSH server configured successfully!"
+        echo "Username: runner"
+        echo "Password: $password"
+
+    - name: Install Essential Software
+      run: |
+        # Update package list
+        sudo apt-get update
+        
+        # Install development tools
+        sudo apt-get install -y \
+          curl \
+          wget \
+          git \
+          vim \
+          nano \
+          htop \
+          tree \
+          unzip \
+          zip \
+          build-essential \
+          software-properties-common \
+          apt-transport-https \
+          ca-certificates \
+          gnupg \
+          lsb-release
+        
+        # Install Node.js
+        curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+        
+        # Install Python pip
+        sudo apt-get install -y python3-pip
+        
+        # Install Docker
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sudo sh get-docker.sh
+        sudo usermod -aG docker runner
+        
+        # Install Docker Compose
+        sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        sudo chmod +x /usr/local/bin/docker-compose
+        
+        echo "Essential software installed successfully!"
+
+    - name: Download and setup ngrok
+      run: |
+        # Download ngrok
+        wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        tar xvzf ngrok-v3-stable-linux-amd64.tgz
+        sudo mv ngrok /usr/local/bin/
+        
+        # Configure ngrok
+        ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+        
+        echo "Ngrok installed and configured!"
+
+    - name: Setup ngrok tunnel
+      run: |
+        # Start ngrok tunnel in background
+        nohup ngrok tcp 22 > /dev/null 2>&1 &
+        sleep 10
+        
+        echo "Ngrok tunnel started!"
+
+    - name: Get ngrok tunnel info
+      run: |
+        # Get tunnel information
+        max_attempts=10
+        attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt to get tunnel info..."
+          
+          tunnel_info=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null || echo "")
+          
+          if [ -n "$tunnel_info" ]; then
+            # Extract tunnel URL using grep and sed
+            tunnel_url=$(echo "$tunnel_info" | grep -o '"public_url":"tcp://[^"]*"' | sed 's/"public_url":"tcp:\/\///' | sed 's/"//')
+            
+            if [ -n "$tunnel_url" ]; then
+              # Split host and port
+              host=$(echo "$tunnel_url" | cut -d':' -f1)
+              port=$(echo "$tunnel_url" | cut -d':' -f2)
+              
+              echo "=================================="
+              echo "🎉 SSH VPS IS READY!"
+              echo "=================================="
+              echo "SSH Host: $host"
+              echo "SSH Port: $port"
+              echo "Username: runner"
+              password="${{ github.event.inputs.password }}"
+              if [ -z "$password" ]; then
+                password="${{ secrets.SSH_PASSWORD }}"
+              fi
+              if [ -z "$password" ]; then
+                password="P@ssw0rd123!"
+              fi
+              echo "Password: $password"
+              echo "=================================="
+              echo ""
+              echo "📋 SSH Command:"
+              echo "ssh runner@$host -p $port"
+              echo ""
+              echo "📋 SCP Upload Example:"
+              echo "scp -P $port file.txt runner@$host:~/"
+              echo ""
+              echo "📋 SCP Download Example:"
+              echo "scp -P $port runner@$host:~/file.txt ./"
+              echo ""
+              echo "⏰ Session will last for ${{ github.event.inputs.duration || '6' }} hours"
+              echo "=================================="
+              break
+            fi
+          fi
+          
+          echo "Waiting for ngrok tunnel... ($attempt/$max_attempts)"
+          sleep 5
+          attempt=$((attempt + 1))
+        done
+        
+        if [ $attempt -gt $max_attempts ]; then
+          echo "❌ Failed to get tunnel information after $max_attempts attempts"
+          echo "Please check ngrok configuration and try again"
+        fi
+
+    - name: Display System Information
+      run: |
+        echo ""
+        echo "🖥️  SYSTEM INFORMATION"
+        echo "=================================="
+        echo "OS: $(lsb_release -d | cut -f2)"
+        echo "Kernel: $(uname -r)"
+        echo "CPU: $(nproc) cores"
+        echo "Memory: $(free -h | grep '^Mem:' | awk '{print $2}')"
+        echo "Disk: $(df -h / | tail -1 | awk '{print $2}')"
+        echo "=================================="
+        echo ""
+        echo "📦 INSTALLED SOFTWARE"
+        echo "=================================="
+        echo "Node.js: $(node --version 2>/dev/null || echo 'Not installed')"
+        echo "npm: $(npm --version 2>/dev/null || echo 'Not installed')"
+        echo "Python: $(python3 --version 2>/dev/null || echo 'Not installed')"
+        echo "pip: $(pip3 --version 2>/dev/null || echo 'Not installed')"
+        echo "Docker: $(docker --version 2>/dev/null || echo 'Not installed')"
+        echo "Git: $(git --version 2>/dev/null || echo 'Not installed')"
+        echo "=================================="
+
+    - name: Keep session alive
+      run: |
+        duration=${{ github.event.inputs.duration || '6' }}
+        end_time=$(date -d "+${duration} hours" +%s)
+        
+        echo "🔄 Keeping session alive until $(date -d "+${duration} hours" '+%Y-%m-%d %H:%M:%S')"
+        
+        while [ $(date +%s) -lt $end_time ]; do
+          current_time=$(date '+%H:%M:%S')
+          remaining_minutes=$(( (end_time - $(date +%s)) / 60 ))
+          
+          echo "⏰ Session active - $current_time - Remaining: $remaining_minutes minutes"
+          
+          # Check if ngrok is still running
+          if ! pgrep -x "ngrok" > /dev/null; then
+            echo "⚠️ Ngrok process died, restarting..."
+            nohup ngrok tcp 22 > /dev/null 2>&1 &
+            sleep 10
+          fi
+          
+          # Check SSH service
+          if ! systemctl is-active --quiet ssh; then
+            echo "⚠️ SSH service is down, restarting..."
+            sudo systemctl restart ssh
+          fi
+          
+          sleep 300  # Wait 5 minutes
+        done
+        
+        echo "⏰ Session time expired. Shutting down..."
+
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "🧹 Cleaning up..."
+        pkill -f ngrok || true
+        sudo systemctl stop ssh || true
+        echo "✅ Cleanup completed"

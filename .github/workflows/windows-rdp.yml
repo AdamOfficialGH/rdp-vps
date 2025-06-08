@@ -1,0 +1,142 @@
+name: Windows RDP
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Duration in hours (max 6)'
+        required: false
+        default: '6'
+        type: string
+      password:
+        description: 'Custom RDP password (optional)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360  # 6 hours max
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Enable RDP
+      run: |
+        # Enable RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -value 1
+        
+        # Set password for runneradmin user
+        $password = "${{ github.event.inputs.password }}"
+        if ([string]::IsNullOrEmpty($password)) {
+          $password = "${{ secrets.RDP_PASSWORD }}"
+        }
+        if ([string]::IsNullOrEmpty($password)) {
+          $password = "P@ssw0rd123!"
+        }
+        
+        net user runneradmin $password
+        net localgroup "Remote Desktop Users" runneradmin /add
+        
+        Write-Host "RDP enabled successfully!"
+        Write-Host "Username: runneradmin"
+        Write-Host "Password: $password"
+
+    - name: Install Chocolatey
+      run: |
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+    - name: Install Essential Software
+      run: |
+        choco install -y googlechrome
+        choco install -y firefox
+        choco install -y 7zip
+        choco install -y notepadplusplus
+        choco install -y git
+        choco install -y nodejs
+        choco install -y python
+        choco install -y vscode
+        choco install -y putty
+        choco install -y winscp
+
+    - name: Download and setup ngrok
+      run: |
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+        Expand-Archive -Path "ngrok.zip" -DestinationPath "C:\ngrok"
+        $env:PATH += ";C:\ngrok"
+        [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Machine)
+
+    - name: Setup ngrok tunnel
+      run: |
+        C:\ngrok\ngrok.exe config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+        Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -WindowStyle Hidden
+        Start-Sleep -Seconds 10
+
+    - name: Get ngrok tunnel info
+      run: |
+        try {
+          $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get
+          $tunnel = $response.tunnels | Where-Object { $_.proto -eq "tcp" }
+          if ($tunnel) {
+            $address = $tunnel.public_url -replace "tcp://", ""
+            Write-Host "=================================="
+            Write-Host "🎉 RDP IS READY!"
+            Write-Host "=================================="
+            Write-Host "RDP Address: $address"
+            Write-Host "Username: runneradmin"
+            Write-Host "Password: $(if ('${{ github.event.inputs.password }}') { '${{ github.event.inputs.password }}' } elseif ('${{ secrets.RDP_PASSWORD }}') { '${{ secrets.RDP_PASSWORD }}' } else { 'P@ssw0rd123!' })"
+            Write-Host "=================================="
+            Write-Host ""
+            Write-Host "📋 Instructions:"
+            Write-Host "1. Open Remote Desktop Connection"
+            Write-Host "2. Enter the address above"
+            Write-Host "3. Use the username and password"
+            Write-Host "4. Click Connect!"
+            Write-Host ""
+            Write-Host "⏰ Session will last for ${{ github.event.inputs.duration || '6' }} hours"
+            Write-Host "=================================="
+          } else {
+            Write-Host "❌ Failed to get tunnel information"
+          }
+        } catch {
+          Write-Host "❌ Error getting tunnel info: $_"
+        }
+
+    - name: Keep session alive
+      run: |
+        $duration = [int]"${{ github.event.inputs.duration || '6' }}"
+        $endTime = (Get-Date).AddHours($duration)
+        
+        Write-Host "🔄 Keeping session alive until $(Get-Date $endTime -Format 'yyyy-MM-dd HH:mm:ss')"
+        
+        while ((Get-Date) -lt $endTime) {
+          Write-Host "⏰ Session active - $(Get-Date -Format 'HH:mm:ss') - Remaining: $([math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)) minutes"
+          
+          # Check if ngrok is still running
+          $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+          if (-not $ngrokProcess) {
+            Write-Host "⚠️ Ngrok process died, restarting..."
+            Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -WindowStyle Hidden
+            Start-Sleep -Seconds 10
+          }
+          
+          # Keep system active
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.SendKeys]::SendWait("{SCROLLLOCK}")
+          
+          Start-Sleep -Seconds 300  # Wait 5 minutes
+        }
+        
+        Write-Host "⏰ Session time expired. Shutting down..."
+
+    - name: Cleanup
+      if: always()
+      run: |
+        Write-Host "🧹 Cleaning up..."
+        Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
+        Write-Host "✅ Cleanup completed"
