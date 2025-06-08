@@ -74,37 +74,86 @@ jobs:
     - name: Setup ngrok tunnel
       run: |
         C:\ngrok\ngrok.exe config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-        Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -WindowStyle Hidden
-        Start-Sleep -Seconds 10
+
+        # Kill any existing ngrok processes
+        Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+        Start-Sleep -Seconds 5
+
+        # Start ngrok with better error handling
+        Write-Host "Starting ngrok tunnel..."
+        Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp", "3389", "--log=stdout" -WindowStyle Hidden
+        Start-Sleep -Seconds 15
+
+        # Verify ngrok is running
+        $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+        if ($ngrokProcess) {
+          Write-Host "✅ Ngrok process is running (PID: $($ngrokProcess.Id))"
+        } else {
+          Write-Host "❌ Ngrok process failed to start"
+        }
 
     - name: Get ngrok tunnel info
       run: |
-        try {
-          $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get
-          $tunnel = $response.tunnels | Where-Object { $_.proto -eq "tcp" }
-          if ($tunnel) {
-            $address = $tunnel.public_url -replace "tcp://", ""
-            Write-Host "=================================="
-            Write-Host "🎉 RDP IS READY!"
-            Write-Host "=================================="
-            Write-Host "RDP Address: $address"
-            Write-Host "Username: runneradmin"
-            Write-Host "Password: $(if ('${{ github.event.inputs.password }}') { '${{ github.event.inputs.password }}' } elseif ('${{ secrets.RDP_PASSWORD }}') { '${{ secrets.RDP_PASSWORD }}' } else { 'P@ssw0rd123!' })"
-            Write-Host "=================================="
-            Write-Host ""
-            Write-Host "📋 Instructions:"
-            Write-Host "1. Open Remote Desktop Connection"
-            Write-Host "2. Enter the address above"
-            Write-Host "3. Use the username and password"
-            Write-Host "4. Click Connect!"
-            Write-Host ""
-            Write-Host "⏰ Session will last for ${{ github.event.inputs.duration || '6' }} hours"
-            Write-Host "=================================="
-          } else {
-            Write-Host "❌ Failed to get tunnel information"
+        # Wait for ngrok API to be ready
+        $maxAttempts = 20
+        $attempt = 1
+        $tunnelFound = $false
+
+        Write-Host "🔍 Waiting for ngrok tunnel to be ready..."
+
+        while ($attempt -le $maxAttempts -and -not $tunnelFound) {
+          try {
+            Write-Host "Attempt $attempt/$maxAttempts - Checking ngrok API..."
+
+            # Check if ngrok process is still running
+            $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+            if (-not $ngrokProcess) {
+              Write-Host "⚠️ Ngrok process not found, restarting..."
+              Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp", "3389", "--log=stdout" -WindowStyle Hidden
+              Start-Sleep -Seconds 10
+            }
+
+            $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get -TimeoutSec 10
+            $tunnel = $response.tunnels | Where-Object { $_.proto -eq "tcp" }
+
+            if ($tunnel) {
+              $address = $tunnel.public_url -replace "tcp://", ""
+              Write-Host "=================================="
+              Write-Host "🎉 RDP IS READY!"
+              Write-Host "=================================="
+              Write-Host "RDP Address: $address"
+              Write-Host "Username: runneradmin"
+              Write-Host "Password: $(if ('${{ github.event.inputs.password }}') { '${{ github.event.inputs.password }}' } elseif ('${{ secrets.RDP_PASSWORD }}') { '${{ secrets.RDP_PASSWORD }}' } else { 'P@ssw0rd123!' })"
+              Write-Host "=================================="
+              Write-Host ""
+              Write-Host "📋 Instructions:"
+              Write-Host "1. Open Remote Desktop Connection"
+              Write-Host "2. Enter the address above"
+              Write-Host "3. Use the username and password"
+              Write-Host "4. Click Connect!"
+              Write-Host ""
+              Write-Host "⏰ Session will last for ${{ github.event.inputs.duration || '6' }} hours"
+              Write-Host "=================================="
+              $tunnelFound = $true
+            } else {
+              Write-Host "⏳ No tunnel found yet, waiting..."
+            }
+          } catch {
+            Write-Host "⏳ Ngrok API not ready yet: $($_.Exception.Message)"
           }
-        } catch {
-          Write-Host "❌ Error getting tunnel info: $_"
+
+          if (-not $tunnelFound) {
+            Start-Sleep -Seconds 15
+            $attempt++
+          }
+        }
+
+        if (-not $tunnelFound) {
+          Write-Host "❌ Failed to establish ngrok tunnel after $maxAttempts attempts"
+          Write-Host "🔧 Troubleshooting tips:"
+          Write-Host "1. Check if NGROK_AUTH_TOKEN is correct"
+          Write-Host "2. Verify ngrok account is not rate limited"
+          Write-Host "3. Try restarting the workflow"
         }
 
     - name: Keep session alive
@@ -121,8 +170,21 @@ jobs:
           $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
           if (-not $ngrokProcess) {
             Write-Host "⚠️ Ngrok process died, restarting..."
-            Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -WindowStyle Hidden
-            Start-Sleep -Seconds 10
+            Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp", "3389", "--log=stdout" -WindowStyle Hidden
+            Start-Sleep -Seconds 15
+
+            # Try to get tunnel info again after restart
+            try {
+              Start-Sleep -Seconds 5
+              $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get -TimeoutSec 10
+              $tunnel = $response.tunnels | Where-Object { $_.proto -eq "tcp" }
+              if ($tunnel) {
+                $address = $tunnel.public_url -replace "tcp://", ""
+                Write-Host "🔄 Tunnel restored: $address"
+              }
+            } catch {
+              Write-Host "⚠️ Could not restore tunnel info"
+            }
           }
           
           # Keep system active
