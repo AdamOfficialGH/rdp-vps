@@ -66,30 +66,55 @@ jobs:
 
     - name: Download and setup ngrok
       run: |
+        # Download ngrok
+        Write-Host "📥 Downloading ngrok..."
         Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
-        Expand-Archive -Path "ngrok.zip" -DestinationPath "C:\ngrok"
-        $env:PATH += ";C:\ngrok"
-        [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Machine)
+
+        # Extract to current directory instead of C:\ngrok
+        Write-Host "📦 Extracting ngrok..."
+        Expand-Archive -Path "ngrok.zip" -DestinationPath "." -Force
+
+        # Verify ngrok exists
+        if (Test-Path ".\ngrok.exe") {
+          Write-Host "✅ Ngrok extracted successfully"
+          .\ngrok.exe version
+        } else {
+          Write-Host "❌ Ngrok extraction failed"
+          exit 1
+        }
 
     - name: Setup ngrok tunnel
       run: |
-        C:\ngrok\ngrok.exe config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+        # Configure ngrok with auth token
+        Write-Host "🔐 Configuring ngrok auth token..."
+        .\ngrok.exe config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
 
         # Kill any existing ngrok processes
+        Write-Host "🧹 Cleaning up existing ngrok processes..."
         Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds 3
 
-        # Start ngrok with better error handling
-        Write-Host "Starting ngrok tunnel..."
-        Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp", "3389", "--log=stdout" -WindowStyle Hidden
-        Start-Sleep -Seconds 15
+        # Start ngrok tunnel in background with proper logging
+        Write-Host "🚀 Starting ngrok tunnel for RDP (port 3389)..."
 
-        # Verify ngrok is running
+        # Use cmd to start ngrok in background
+        $ngrokCmd = ".\ngrok.exe tcp 3389 --log=stdout"
+        Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $ngrokCmd -WindowStyle Hidden -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok_error.log"
+
+        # Wait for ngrok to start
+        Write-Host "⏳ Waiting for ngrok to initialize..."
+        Start-Sleep -Seconds 20
+
+        # Check if ngrok process is running
         $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
         if ($ngrokProcess) {
-          Write-Host "✅ Ngrok process is running (PID: $($ngrokProcess.Id))"
+          Write-Host "✅ Ngrok process started successfully (PID: $($ngrokProcess.Id))"
         } else {
           Write-Host "❌ Ngrok process failed to start"
+          Write-Host "📋 Checking error logs..."
+          if (Test-Path "ngrok_error.log") {
+            Get-Content "ngrok_error.log"
+          }
         }
 
     - name: Get ngrok tunnel info
@@ -109,8 +134,9 @@ jobs:
             $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
             if (-not $ngrokProcess) {
               Write-Host "⚠️ Ngrok process not found, restarting..."
-              Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp", "3389", "--log=stdout" -WindowStyle Hidden
-              Start-Sleep -Seconds 10
+              $ngrokCmd = ".\ngrok.exe tcp 3389 --log=stdout"
+              Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $ngrokCmd -WindowStyle Hidden -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok_error.log"
+              Start-Sleep -Seconds 15
             }
 
             $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get -TimeoutSec 10
@@ -170,8 +196,9 @@ jobs:
           $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
           if (-not $ngrokProcess) {
             Write-Host "⚠️ Ngrok process died, restarting..."
-            Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp", "3389", "--log=stdout" -WindowStyle Hidden
-            Start-Sleep -Seconds 15
+            $ngrokCmd = ".\ngrok.exe tcp 3389 --log=stdout"
+            Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $ngrokCmd -WindowStyle Hidden -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok_error.log"
+            Start-Sleep -Seconds 20
 
             # Try to get tunnel info again after restart
             try {
