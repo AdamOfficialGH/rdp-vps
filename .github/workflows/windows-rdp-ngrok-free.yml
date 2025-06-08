@@ -1,0 +1,152 @@
+name: Windows RDP (Ngrok Free - WORKING)
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Duration in hours (max 6)'
+        required: false
+        default: '6'
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+    - name: Enable RDP
+      run: |
+        Write-Host "🔧 Enabling RDP..."
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -value 1
+        
+        Write-Host "👤 Setting up user..."
+        net user runneradmin P@ssw0rd123!
+        net localgroup "Remote Desktop Users" runneradmin /add
+        
+        Write-Host "✅ RDP enabled successfully!"
+
+    - name: Install Essential Software
+      run: |
+        Write-Host "📦 Installing software..."
+        
+        # Install Chocolatey
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        
+        # Install essential software
+        choco install -y googlechrome firefox 7zip notepadplusplus git
+        
+        Write-Host "✅ Software installed!"
+
+    - name: Download and Setup Ngrok
+      run: |
+        Write-Host "📥 Downloading ngrok..."
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+        Expand-Archive -Path "ngrok.zip" -DestinationPath "." -Force
+        
+        Write-Host "✅ Ngrok downloaded!"
+
+    - name: Start Ngrok HTTP Tunnel
+      run: |
+        Write-Host "🚀 Starting ngrok HTTP tunnel..."
+        
+        # Create simple info page
+        $info = @"
+<html><body style='font-family:Arial;margin:40px;'>
+<h1 style='color:green;'>🎉 Windows RDP Ready!</h1>
+<div style='background:#f0f0f0;padding:20px;border-radius:5px;'>
+<h3>📋 Connection Info:</h3>
+<p><strong>Username:</strong> runneradmin</p>
+<p><strong>Password:</strong> P@ssw0rd123!</p>
+<p><strong>Port:</strong> 3389</p>
+</div>
+<p>Check GitHub Actions logs for tunnel URL!</p>
+</body></html>
+"@
+        $info | Out-File -FilePath "index.html" -Encoding UTF8
+        
+        # Start HTTP server
+        Start-Process -FilePath "python" -ArgumentList "-m", "http.server", "8080" -WindowStyle Hidden
+        Start-Sleep -Seconds 3
+        
+        # Start ngrok tunnel
+        Start-Process -FilePath ".\ngrok.exe" -ArgumentList "http", "8080" -WindowStyle Hidden
+        Start-Sleep -Seconds 10
+
+    - name: Get Tunnel URL
+      run: |
+        Write-Host "🔍 Getting tunnel URL..."
+        
+        $maxAttempts = 10
+        $attempt = 1
+        
+        while ($attempt -le $maxAttempts) {
+          try {
+            $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get -TimeoutSec 5
+            $tunnel = $response.tunnels | Where-Object { $_.proto -eq "https" } | Select-Object -First 1
+            
+            if ($tunnel) {
+              $url = $tunnel.public_url
+              
+              Write-Host "=================================="
+              Write-Host "🎉 WINDOWS RDP IS READY!"
+              Write-Host "=================================="
+              Write-Host "🌐 Web Info: $url"
+              Write-Host "📋 RDP Details:"
+              Write-Host "   Username: runneradmin"
+              Write-Host "   Password: P@ssw0rd123!"
+              Write-Host "   Port: 3389"
+              Write-Host "=================================="
+              Write-Host ""
+              Write-Host "📱 Instructions:"
+              Write-Host "1. Open: $url"
+              Write-Host "2. Use Microsoft Remote Desktop app"
+              Write-Host "3. Connect with details above"
+              Write-Host ""
+              Write-Host "⏰ Duration: ${{ github.event.inputs.duration || '6' }} hours"
+              Write-Host "=================================="
+              
+              break
+            }
+          } catch {
+            Write-Host "Attempt $attempt/$maxAttempts - Waiting for ngrok..."
+            Start-Sleep -Seconds 5
+            $attempt++
+          }
+        }
+        
+        if ($attempt -gt $maxAttempts) {
+          Write-Host "❌ Could not get tunnel URL"
+          Write-Host "🔧 Check manually: http://localhost:4040"
+        }
+
+    - name: Keep Session Alive
+      run: |
+        $duration = [int]"${{ github.event.inputs.duration || '6' }}"
+        $endTime = (Get-Date).AddHours($duration)
+        
+        Write-Host "🔄 Session will run until: $endTime"
+        
+        while ((Get-Date) -lt $endTime) {
+          $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
+          Write-Host "⏰ Session active - $remaining minutes remaining"
+          
+          # Keep system awake
+          [System.Windows.Forms.SendKeys]::SendWait("{SCROLLLOCK}")
+          
+          Start-Sleep -Seconds 300  # 5 minutes
+        }
+        
+        Write-Host "⏰ Session expired. Goodbye!"
+
+    - name: Cleanup
+      if: always()
+      run: |
+        Write-Host "🧹 Cleaning up..."
+        Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
+        Stop-Process -Name "python" -Force -ErrorAction SilentlyContinue
+        Write-Host "✅ Cleanup done!"
